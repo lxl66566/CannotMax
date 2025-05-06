@@ -1,13 +1,40 @@
+import math
 import os
+import random
+from functools import cache
+
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from sklearn.model_selection import train_test_split
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader, Dataset
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+@cache
+def get_device(prefer_gpu=True):
+    """
+    获取可用的PyTorch设备
+
+    参数:
+        prefer_gpu (bool): 是否优先尝试使用GPU
+
+    返回:
+        torch.device: 可用的设备
+    """
+    if prefer_gpu:
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return torch.device("mps")  # Apple Silicon GPU
+        elif hasattr(torch, "xpu") and torch.xpu.is_available():  # Intel GPU
+            return torch.device("xpu")
+    return torch.device("cpu")
+
+
+device = get_device()
+
 
 def preprocess_data(csv_file):
     """预处理CSV文件，将异常值修正为合理范围"""
@@ -17,59 +44,132 @@ def preprocess_data(csv_file):
     data = pd.read_csv(csv_file, header=None, skiprows=1)
     print(f"原始数据形状: {data.shape}")
 
-    # 检查特征范围
-    features = data.iloc[:, :-1]
-    labels = data.iloc[:, -1]
+    # # 检查特征范围
+    # features = data.iloc[:, :-1].astype(np.int8)
+    # labels = data.iloc[:, -1].astype(np.int8)
 
-    # 统计极端值
-    extreme_values = (np.abs(features) > 20).sum().sum()
-    if extreme_values > 0:
-        print(f"发现 {extreme_values} 个绝对值大于20的特征值")
+    # # 统计极端值
+    # extreme_values = (np.abs(features) > 20).sum().sum()
+    # if extreme_values > 0:
+    #     print(f"发现 {extreme_values} 个绝对值大于20的特征值")
 
-    # 检查标签
-    invalid_labels = labels.apply(lambda x: x not in ['L', 'R']).sum()
-    if invalid_labels > 0:
-        print(f"发现 {invalid_labels} 个无效标签")
+    # # 检查标签
+    # invalid_labels = labels.apply(lambda x: x not in ["L", "R"]).sum()
+    # if invalid_labels > 0:
+    #     print(f"发现 {invalid_labels} 个无效标签")
 
-    # 输出特征的范围信息
-    feature_min = features.min().min()
-    feature_max = features.max().max()
-    feature_mean = features.mean().mean()
-    feature_std = features.std().mean()
+    # # 输出特征的范围信息
+    # feature_min = features.min().min()
+    # feature_max = features.max().max()
+    # feature_mean = features.mean().mean()
+    # feature_std = features.std().mean()
 
-    print(f"特征值范围: [{feature_min}, {feature_max}]")
-    print(f"特征值平均值: {feature_mean:.4f}, 标准差: {feature_std:.4f}")
+    # print(f"特征值范围: [{feature_min}, {feature_max}]")
+    # print(f"特征值平均值: {feature_mean:.4f}, 标准差: {feature_std:.4f}")
 
-    # 如果需要，可以在这里对数据进行更多的预处理
-    # 例如：将极端值截断到合理范围
+    # # 如果需要，可以在这里对数据进行更多的预处理
+    # # 例如：将极端值截断到合理范围
 
     return data.shape[1]
 
 
 class ArknightsDataset(Dataset):
-    def __init__(self, csv_file, max_value=None):
+    def __init__(self, csv_file, max_value=None, data_enhance=True, augment_factor=7):
         data = pd.read_csv(csv_file, header=None, skiprows=1)
-        features = data.iloc[:, :-1].values.astype(np.float32)
-        labels = data.iloc[:, -1].map({'L': 0, 'R': 1}).values
+        features = data.iloc[:, :112].values.astype(np.float32)
+        labels = data.iloc[:, 112].map({"L": 0, "R": 1}).values.astype(np.int8)
         labels = np.where((labels != 0) & (labels != 1), 0, labels).astype(np.float32)
 
         # 分割双方单位
         feature_count = features.shape[1]
         midpoint = feature_count // 2
-        left_counts = np.abs(features[:, :midpoint])
-        right_counts = np.abs(features[:, midpoint:])
-        left_signs = np.sign(features[:, :midpoint])
-        right_signs = np.sign(features[:, midpoint:])
+        left_features = features[:, :midpoint]
+        right_features = features[:, midpoint:]
 
+        # 记录原始数据的长度
+        self.original_length = len(labels)
+        # 用于标记每个样本是否为增强数据的掩码
+        self.augmented_mask = np.zeros(self.original_length, dtype=bool)
+
+        if data_enhance:
+            # 数据增强
+            aug_left, aug_right, aug_labels = [], [], []
+
+            for i in range(len(labels)):
+                left = left_features[i]
+                right = right_features[i]
+                label = labels[i]
+
+                # 添加原始样本
+                aug_left.append(left)
+                aug_right.append(right)
+                aug_labels.append(label)
+
+                # 增强数据
+                # 找出非零维度
+                non_zero_dims_left = np.nonzero(left)[0]
+                non_zero_dims_right = np.nonzero(right)[0]
+
+                per_factor = math.ceil(len(non_zero_dims_left) / augment_factor)
+                if label == 0:  # L
+                    for dim in non_zero_dims_left:
+                        original_val = int(left[dim])
+                        # 在 (x+1, x*1.5) 范围内取样
+                        min_val = original_val + 1
+                        max_val = max(int(original_val * 1.5), min_val + 1)
+
+                        new_x = random.sample(
+                            range(min_val, max_val), min(per_factor, max_val - min_val)
+                        )
+                        for x in new_x:
+                            new_left = left.copy()
+                            new_left[dim] = x
+                            aug_left.append(new_left)
+                            aug_right.append(right)
+                            aug_labels.append(label)
+                else:  # R
+                    for dim in non_zero_dims_right:
+                        original_val = int(right[dim])
+                        min_val = original_val + 1
+                        max_val = max(int(original_val * 1.5), min_val + 1)
+
+                        new_x = random.sample(
+                            range(min_val, max_val), min(per_factor, max_val - min_val)
+                        )
+                        for x in new_x:
+                            new_right = right.copy()
+                            new_right[dim] = x
+                            aug_right.append(new_right)
+                            aug_left.append(left)
+                            aug_labels.append(label)
+
+            # 转换增强后的数据为 numpy 数组
+            left_features = np.array(aug_left).astype(np.float32)
+            right_features = np.array(aug_right).astype(np.float32)
+            labels = np.array(aug_labels).astype(np.float32)
+
+            # 更新增强数据掩码
+            self.augmented_mask = np.concatenate(
+                [
+                    np.zeros(self.original_length, dtype=bool),  # 原始数据
+                    np.ones(len(labels) - self.original_length, dtype=bool),  # 增强数据
+                ]
+            )
+
+            print(
+                f"增强后数据形状: {left_features.shape}, {right_features.shape}, {labels.shape}"
+            )
+
+        # 继续原有的处理逻辑
         if max_value is not None:
-            left_counts = np.clip(left_counts, 0, max_value)
-            right_counts = np.clip(right_counts, 0, max_value)
+            left_features = np.clip(left_features, 0, max_value)
+            right_features = np.clip(right_features, 0, max_value)
 
-        # 转换为 PyTorch 张量，并一次性加载到 GPU
-        self.left_signs = torch.from_numpy(left_signs).to(device)
-        self.right_signs = torch.from_numpy(right_signs).to(device)
-        self.left_counts = torch.from_numpy(left_counts).to(device)
-        self.right_counts = torch.from_numpy(right_counts).to(device)
+        # 转换为 PyTorch 张量并加载到 GPU
+        self.left_counts = torch.from_numpy(left_features).to(device)
+        self.right_counts = torch.from_numpy(right_features).to(device)
+        self.left_signs = torch.from_numpy(np.sign(left_features)).to(device)
+        self.right_signs = torch.from_numpy(np.sign(right_features)).to(device)
         self.labels = torch.from_numpy(labels).float().to(device)
 
     def __len__(self):
@@ -99,7 +199,7 @@ class UnitAwareTransformer(nn.Module):
         self.value_ffn = nn.Sequential(
             nn.Linear(embed_dim, embed_dim * 2),
             nn.ReLU(),
-            nn.Linear(embed_dim * 2, embed_dim)
+            nn.Linear(embed_dim * 2, embed_dim),
         )
 
         # 注意力层与FFN
@@ -111,25 +211,33 @@ class UnitAwareTransformer(nn.Module):
         for _ in range(num_layers):
             # 敌方注意力层
             self.enemy_attentions.append(
-                nn.MultiheadAttention(embed_dim, num_heads, batch_first=True, dropout=0.2)
+                nn.MultiheadAttention(
+                    embed_dim, num_heads, batch_first=True, dropout=0.2
+                )
             )
-            self.enemy_ffn.append(nn.Sequential(
-                nn.Linear(embed_dim, embed_dim * 2),
-                nn.ReLU(),
-                nn.Dropout(0.2),
-                nn.Linear(embed_dim * 2, embed_dim)
-            ))
+            self.enemy_ffn.append(
+                nn.Sequential(
+                    nn.Linear(embed_dim, embed_dim * 2),
+                    nn.ReLU(),
+                    nn.Dropout(0.2),
+                    nn.Linear(embed_dim * 2, embed_dim),
+                )
+            )
 
             # 友方注意力层
             self.friend_attentions.append(
-                nn.MultiheadAttention(embed_dim, num_heads, batch_first=True, dropout=0.2)
+                nn.MultiheadAttention(
+                    embed_dim, num_heads, batch_first=True, dropout=0.2
+                )
             )
-            self.friend_ffn.append(nn.Sequential(
-                nn.Linear(embed_dim, embed_dim * 2),
-                nn.ReLU(),
-                nn.Dropout(0.2),
-                nn.Linear(embed_dim * 2, embed_dim)
-            ))
+            self.friend_ffn.append(
+                nn.Sequential(
+                    nn.Linear(embed_dim, embed_dim * 2),
+                    nn.ReLU(),
+                    nn.Dropout(0.2),
+                    nn.Linear(embed_dim * 2, embed_dim),
+                )
+            )
 
             # 初始化注意力层参数
             nn.init.xavier_uniform_(self.enemy_attentions[-1].in_proj_weight)
@@ -137,11 +245,8 @@ class UnitAwareTransformer(nn.Module):
 
         # 全连接输出层
         self.fc = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 2),
-            nn.ReLU(),
-            nn.Linear(embed_dim * 2, 1)
+            nn.Linear(embed_dim, embed_dim * 2), nn.ReLU(), nn.Linear(embed_dim * 2, 1)
         )
-
 
     def forward(self, left_sign, left_count, right_sign, right_count):
         # 提取Top3兵种特征
@@ -155,22 +260,29 @@ class UnitAwareTransformer(nn.Module):
         embed_dim = self.embed_dim
 
         # 前x维不变，后y维 *= 数量，但使用缩放后的值
-        left_feat = torch.cat([
-            left_feat[..., :embed_dim // 2],  # 前x维
-            left_feat[..., embed_dim // 2:] * left_values.unsqueeze(-1)  # 后y维乘数量
-        ], dim=-1)
-        right_feat = torch.cat([
-            right_feat[..., :embed_dim // 2],
-            right_feat[..., embed_dim // 2:] * right_values.unsqueeze(-1)
-        ], dim=-1)
+        left_feat = torch.cat(
+            [
+                left_feat[..., : embed_dim // 2],  # 前x维
+                left_feat[..., embed_dim // 2 :]
+                * left_values.unsqueeze(-1),  # 后y维乘数量
+            ],
+            dim=-1,
+        )
+        right_feat = torch.cat(
+            [
+                right_feat[..., : embed_dim // 2],
+                right_feat[..., embed_dim // 2 :] * right_values.unsqueeze(-1),
+            ],
+            dim=-1,
+        )
 
         # FFN
         left_feat = left_feat + self.value_ffn(left_feat)
         right_feat = right_feat + self.value_ffn(right_feat)
 
         # 生成mask (B, 3) 0.1防一手可能的浮点误差
-        left_mask = (left_values > 0.1)
-        right_mask = (right_values > 0.1)
+        left_mask = left_values > 0.1
+        right_mask = right_values > 0.1
 
         for i in range(self.num_layers):
             # 敌方注意力
@@ -179,14 +291,14 @@ class UnitAwareTransformer(nn.Module):
                 key=right_feat,
                 value=right_feat,
                 key_padding_mask=~right_mask,
-                need_weights=False
+                need_weights=False,
             )
             delta_right, _ = self.enemy_attentions[i](
                 query=right_feat,
                 key=left_feat,
                 value=left_feat,
                 key_padding_mask=~left_mask,
-                need_weights=False
+                need_weights=False,
             )
 
             # 残差连接
@@ -203,14 +315,14 @@ class UnitAwareTransformer(nn.Module):
                 key=left_feat,
                 value=left_feat,
                 key_padding_mask=~left_mask,
-                need_weights=False
+                need_weights=False,
             )
             delta_right, _ = self.friend_attentions[i](
                 query=right_feat,
                 key=right_feat,
                 value=right_feat,
                 key_padding_mask=~right_mask,
-                need_weights=False
+                need_weights=False,
             )
 
             # 残差连接
@@ -243,11 +355,21 @@ def train_one_epoch(model, train_loader, criterion, optimizer):
         optimizer.zero_grad()
 
         # 检查输入值范围
-        if torch.isnan(ls).any() or torch.isnan(lc).any() or torch.isnan(rs).any() or torch.isnan(rc).any():
+        if (
+            torch.isnan(ls).any()
+            or torch.isnan(lc).any()
+            or torch.isnan(rs).any()
+            or torch.isnan(rc).any()
+        ):
             print("警告: 输入数据包含NaN，跳过该批次")
             continue
 
-        if torch.isinf(ls).any() or torch.isinf(lc).any() or torch.isinf(rs).any() or torch.isinf(rc).any():
+        if (
+            torch.isinf(ls).any()
+            or torch.isinf(lc).any()
+            or torch.isinf(rs).any()
+            or torch.isinf(rc).any()
+        ):
             print("警告: 输入数据包含Inf，跳过该批次")
             continue
 
@@ -306,8 +428,16 @@ def evaluate(model, data_loader, criterion):
             ls, lc, rs, rc, labels = [x.to(device) for x in (ls, lc, rs, rc, labels)]
 
             # 检查输入值范围
-            if torch.isnan(ls).any() or torch.isnan(lc).any() or torch.isnan(rs).any() or torch.isnan(rc).any() or \
-                    torch.isinf(ls).any() or torch.isinf(lc).any() or torch.isinf(rs).any() or torch.isinf(rc).any():
+            if (
+                torch.isnan(ls).any()
+                or torch.isnan(lc).any()
+                or torch.isnan(rs).any()
+                or torch.isnan(rc).any()
+                or torch.isinf(ls).any()
+                or torch.isinf(lc).any()
+                or torch.isinf(rs).any()
+                or torch.isinf(rc).any()
+            ):
                 print("警告: 评估时输入数据包含NaN或Inf，跳过该批次")
                 continue
 
@@ -344,59 +474,90 @@ def evaluate(model, data_loader, criterion):
 
     return total_loss / max(1, len(data_loader)), 100 * correct / max(1, total)
 
+
 def stratified_random_split(dataset, test_size=0.1, seed=42):
+    """
+    将数据集分割为训练集和测试集，确保增强数据只进入训练集
+
+    参数:
+        dataset: ArknightsDataset 实例
+        test_size: 测试集比例
+        seed: 随机种子
+    """
     labels = dataset.labels  # 假设 labels 是一个 GPU tensor
-    if device != 'cpu':
+    if device != "cpu":
         labels = labels.cpu()  # 移动到 CPU 上进行操作
-    labels = labels.numpy()   # 转换为 numpy array
+    labels = labels.numpy()  # 转换为 numpy array
 
-    from sklearn.model_selection import train_test_split
+    # 获取原始数据的索引
+    original_indices = np.where(~dataset.augmented_mask)[0]
+    augmented_indices = np.where(dataset.augmented_mask)[0]
 
-    indices = np.arange(len(labels))
-    train_indices, val_indices = train_test_split(
-        indices,
+    # 只对原始数据进行分层抽样
+    original_labels = labels[original_indices]
+    train_indices_orig, val_indices = train_test_split(
+        original_indices,
         test_size=test_size,
         random_state=seed,
-        stratify=labels
+        stratify=original_labels,
     )
+
+    # 将所有增强数据添加到训练集，并转换为列表
+    train_indices = np.concatenate([train_indices_orig, augmented_indices]).tolist()
+    val_indices = val_indices.tolist()
+
+    # 返回训练集和验证集
     return (
         torch.utils.data.Subset(dataset, train_indices),
-        torch.utils.data.Subset(dataset, val_indices)
+        torch.utils.data.Subset(dataset, val_indices),
     )
+
 
 def main():
     # 配置参数
     config = {
-        'data_file': 'arknights.csv',
-        'batch_size': 1024, #128,
-        'test_size': 0.1,
-        'embed_dim': 256, #128不够用了，512会过拟合
-        'n_layers': 4,
-        'num_heads': 8,
-        'lr': 3e-4,
-        'epochs': 100,
-        'seed': 42,
-        'save_dir': 'models',
-        'max_feature_value': 100  # 限制特征最大值，防止极端值造成不稳定
+        # 数据文件路径
+        "data_file": "merged_arknights_1.csv",
+        # 训练时的批量大小，影响内存使用和训练速度，128不够用了
+        "batch_size": 2048,
+        # 测试集比例（10%的数据作为测试集）
+        "test_size": 0.1,
+        # 嵌入层的维度大小（特征表示的维度）128不够用了，512会过拟合
+        "embed_dim": 256,
+        # Transformer的层数（堆叠的编码器/解码器层数量）
+        "n_layers": 4,
+        # 多头注意力机制中的头数
+        "num_heads": 8,
+        # 学习率，控制参数更新的步长
+        "lr": 1e-4,
+        # 训练的总轮次
+        "epochs": 50,
+        # 随机种子，用于保证实验可重复性
+        "seed": 42,
+        # 模型保存目录
+        "save_dir": "models",
+        # 特征值的最大限制，用于数据预处理，防止极端值影响模型稳定性
+        "max_feature_value": 60,
     }
 
     # 创建保存目录
-    os.makedirs(config['save_dir'], exist_ok=True)
+    os.makedirs(config["save_dir"], exist_ok=True)
 
     # 设置随机种子
-    torch.manual_seed(config['seed'])
-    np.random.seed(config['seed'])
+    torch.manual_seed(config["seed"])
+    np.random.seed(config["seed"])
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(config['seed'])
+        torch.cuda.manual_seed_all(config["seed"])
 
     # 设置设备
     print(f"使用设备: {device}")
 
     # 检查CUDA可用性
-    if torch.cuda.is_available():
-        print(f"CUDA设备数量: {torch.cuda.device_count()}")
-        print(f"当前CUDA设备: {torch.cuda.current_device()}")
-        print(f"CUDA设备名称: {torch.cuda.get_device_name(0)}")
+    if device != "cpu":
+        if torch.cuda.is_available():
+            print(f"CUDA设备数量: {torch.cuda.device_count()}")
+            print(f"当前CUDA设备: {torch.cuda.current_device()}")
+            print(f"CUDA设备名称: {torch.cuda.get_device_name(0)}")
 
         # 设置确定性计算以增加稳定性
         torch.backends.cudnn.deterministic = True
@@ -405,50 +566,57 @@ def main():
         print("警告: 未检测到GPU，将在CPU上运行训练，这可能会很慢!")
 
     # 先预处理数据，检查是否有异常值
-    num_data=preprocess_data(config['data_file'])
+    num_data = preprocess_data(config["data_file"])
 
     # 加载数据集
     dataset = ArknightsDataset(
-        config['data_file'],
-        max_value=config['max_feature_value']  # 使用最大值限制
+        config["data_file"],
+        max_value=config["max_feature_value"],  # 使用最大值限制
     )
 
     # 数据集分割
     val_size = int(0.1 * len(dataset))  # 10% 验证集
     train_size = len(dataset) - val_size
 
+    print(f"数据集大小: {len(dataset)}")
+    print(f"训练集大小: {train_size}, 验证集大小: {val_size}")
+
     # 划分
-    train_dataset, val_dataset = stratified_random_split(dataset, test_size=config['test_size'], seed=config['seed'])
+    train_dataset, val_dataset = stratified_random_split(
+        dataset, test_size=config["test_size"], seed=config["seed"]
+    )
 
     print(f"训练集大小: {train_size}, 验证集大小: {val_size}")
 
     # 数据加载器
     train_loader = DataLoader(
         train_dataset,
-        batch_size=config['batch_size'],
+        batch_size=config["batch_size"],
         shuffle=True,
         num_workers=0,
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=config['batch_size'],
+        batch_size=config["batch_size"],
         num_workers=0,
     )
 
     # 初始化模型
     model = UnitAwareTransformer(
         num_units=(num_data - 1) // 2,
-        embed_dim=config['embed_dim'],
-        num_heads=config['num_heads'],
-        num_layers=config['n_layers']
+        embed_dim=config["embed_dim"],
+        num_heads=config["num_heads"],
+        num_layers=config["n_layers"],
     ).to(device)
 
-    print(f"模型参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    print(
+        f"模型参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad)}"
+    )
 
     # 损失函数和优化器
     criterion = nn.BCELoss()
-    optimizer = optim.AdamW(model.parameters(), lr=config['lr'], weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['epochs'])
+    optimizer = optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["epochs"])
 
     # 训练历史记录
     train_losses = []
@@ -458,19 +626,19 @@ def main():
 
     # 训练设置
     best_acc = 0
-    best_loss = float('inf')
+    best_loss = float("inf")
 
     # 训练循环
-    for epoch in range(config['epochs']):
+    for epoch in range(config["epochs"]):
         print(f"\nEpoch {epoch + 1}/{config['epochs']}")
 
         # 训练
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer)
+            model, train_loader, criterion, optimizer
+        )
 
         # 验证
-        val_loss, val_acc = evaluate(
-            model, val_loader, criterion)
+        val_loss, val_acc = evaluate(model, val_loader, criterion)
 
         # 更新学习率
         scheduler.step()
@@ -484,27 +652,36 @@ def main():
         # 保存最佳模型（基于准确率）
         if val_acc > best_acc:
             best_acc = val_acc
-            torch.save(model.state_dict(), os.path.join(config['save_dir'], 'best_model_acc.pth'))
-            torch.save(model, os.path.join(config['save_dir'], 'best_model_full.pth'))
+            torch.save(
+                model.state_dict(),
+                os.path.join(config["save_dir"], "best_model_acc.pth"),
+            )
+            torch.save(model, os.path.join(config["save_dir"], "best_model_full.pth"))
             print("保存了新的最佳准确率模型!")
 
         # 保存最佳模型（基于损失）
         if val_loss < best_loss:
             best_loss = val_loss
-            torch.save(model.state_dict(), os.path.join(config['save_dir'], 'best_model_loss.pth'))
+            torch.save(
+                model.state_dict(),
+                os.path.join(config["save_dir"], "best_model_loss.pth"),
+            )
             print("保存了新的最佳损失模型!")
 
-        # # 保存最新模型
-        # torch.save({
-        #     'epoch': epoch,
-        #     'model_state_dict': model.state_dict(),
-        #     'optimizer_state_dict': optimizer.state_dict(),
-        #     'train_loss': train_loss,
-        #     'val_loss': val_loss,
-        #     'train_acc': train_acc,
-        #     'val_acc': val_acc,
-        #     'config': config
-        # }, os.path.join(config['save_dir'], 'latest_checkpoint.pth'))
+        # 保存最新模型
+        torch.save(
+            {
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "train_acc": train_acc,
+                "val_acc": val_acc,
+                "config": config,
+            },
+            os.path.join(config["save_dir"], "latest_checkpoint.pth"),
+        )
 
         # 打印训练信息
         print(f"Train Loss: {train_loss:.4f} | Acc: {train_acc:.2f}%")

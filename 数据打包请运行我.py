@@ -1,6 +1,6 @@
 import os
-import shutil
 import zipfile
+
 
 def create_zip_package(output_zip_path):
     # 定义文件和文件夹路径
@@ -30,6 +30,7 @@ def create_zip_package(output_zip_path):
                 zipf.write(file_path, arcname=arcname)
 
     print(f"压缩包已创建：{output_zip_path}")
+
 
 # 调用函数创建压缩包
 create_zip_package("arknights_package.zip")

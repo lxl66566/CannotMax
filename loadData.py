@@ -1,35 +1,34 @@
 import subprocess
 import time
+
 import cv2
 import numpy as np
 
 adb_path = r".\platform-tools\adb.exe"
 # 默认设备序列号，可以在main.py中修改
-manual_serial = '127.0.0.1:5555'
+manual_serial = "127.0.0.1:16384"
+
 
 def set_device_serial(serial):
     global manual_serial
     manual_serial = serial
 
+
 def get_device_serial():
     global device_serial
     try:
         # 使用当前的manual_serial值
-        subprocess.run(f'{adb_path} connect {manual_serial}', shell=True, check=True)
+        subprocess.run(f"{adb_path} connect {manual_serial}", shell=True, check=True)
 
         # 检查手动设备是否在线
         result = subprocess.run(
-            f'{adb_path} devices',
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=5
+            f"{adb_path} devices", shell=True, capture_output=True, text=True, timeout=5
         )
 
         devices = []
-        for line in result.stdout.split('\n'):
-            if '\tdevice' in line:
-                dev = line.split('\t')[0]
+        for line in result.stdout.split("\n"):
+            if "\tdevice" in line:
+                dev = line.split("\t")[0]
                 devices.append(dev)
                 if dev == manual_serial:
                     device_serial = dev
@@ -48,6 +47,7 @@ def get_device_serial():
         print(f"设备检测失败: {str(e)}")
         return None
 
+
 # 初始化设备序列号
 try:
     device_serial = get_device_serial()
@@ -56,14 +56,17 @@ except RuntimeError as e:
     print(f"错误: {str(e)}")
     exit(1)
 
+
 def connect_to_emulator():
     try:
         # 使用绝对路径连接到雷电模拟器
-        subprocess.run(f'{adb_path} connect {device_serial}', shell=True, check=True)
+        subprocess.run(f"{adb_path} connect {device_serial}", shell=True, check=True)
     except subprocess.CalledProcessError as e:
         print(f"ADB connect command failed: {e}")
     except FileNotFoundError as e:
-        print(f"Error: {e}. Please ensure adb is installed and added to the system PATH.")
+        print(
+            f"Error: {e}. Please ensure adb is installed and added to the system PATH."
+        )
 
 
 connect_to_emulator()
@@ -72,24 +75,24 @@ connect_to_emulator()
 try:
     # 执行ADB命令获取分辨率
     result = subprocess.run(
-        f'{adb_path} -s {device_serial} shell wm size',
+        f"{adb_path} -s {device_serial} shell wm size",
         shell=True,
         capture_output=True,
         text=True,
-        check=True
+        check=True,
     )
     output = result.stdout.strip()
 
     # 解析分辨率输出
-    if 'Physical size:' in output:
-        res_str = output.split('Physical size: ')[1]
-    elif 'Override size:' in output:
-        res_str = output.split('Override size: ')[1]
+    if "Physical size:" in output:
+        res_str = output.split("Physical size: ")[1]
+    elif "Override size:" in output:
+        res_str = output.split("Override size: ")[1]
     else:
         raise ValueError("无法解析分辨率输出格式")
 
     # 分割分辨率并转换为整数
-    width, height = map(int, res_str.split('x'))
+    width, height = map(int, res_str.split("x"))
     if width > height:
         screen_width = width
         screen_height = height
@@ -97,13 +100,15 @@ try:
         screen_width = height
         screen_height = width
     print(f"成功获取模拟器分辨率: {screen_width}x{screen_height}")
-except Exception as e: # 否则使用默认分辨率
+except Exception as e:  # 否则使用默认分辨率
     print(f"获取分辨率失败，使用默认分辨率1920x1080。错误: {e}")
     screen_width = 1920
     screen_height = 1080
 
-process_images = [cv2.imread(f'images/process/{i}.png') for i in range(16)]#16个模板
-process_images = [cv2.resize(img, (screen_width, screen_height)) for img in process_images]
+process_images = [cv2.imread(f"images/process/{i}.png") for i in range(16)]  # 16个模板
+process_images = [
+    cv2.resize(img, (screen_width, screen_height)) for img in process_images
+]
 
 relative_points = [
     (0.9297, 0.8833),  # 右ALL、返回主页、加入赛事、开始游戏
@@ -113,12 +118,12 @@ relative_points = [
     (0.4979, 0.6324),  # 本轮观望
 ]
 
+
 def capture_screenshot():
     try:
         # 获取二进制图像数据
         screenshot_data = subprocess.check_output(
-            f'{adb_path} -s {device_serial} exec-out screencap -p',
-            shell=True
+            f"{adb_path} -s {device_serial} exec-out screencap -p", shell=True
         )
 
         # 将二进制数据转换为numpy数组
@@ -137,11 +142,13 @@ def capture_screenshot():
 
 
 def match_images(screenshot, templates):
-    screenshot_quarter = screenshot[int(screenshot.shape[0] * 3 / 4):, :]
+    screenshot_quarter = screenshot[int(screenshot.shape[0] * 3 / 4) :, :]
     results = []
     for idx, template in enumerate(templates):
-        template_quarter = template[int(template.shape[0] * 3 / 4):, :]
-        res = cv2.matchTemplate(screenshot_quarter, template_quarter, cv2.TM_CCOEFF_NORMED)
+        template_quarter = template[int(template.shape[0] * 3 / 4) :, :]
+        res = cv2.matchTemplate(
+            screenshot_quarter, template_quarter, cv2.TM_CCOEFF_NORMED
+        )
         _, max_val, _, _ = cv2.minMaxLoc(res)
         results.append((idx, max_val))
     return results
@@ -152,7 +159,9 @@ def click(point):
     x_coord = int(x * screen_width)
     y_coord = int(y * screen_height)
     print(f"点击坐标: ({x_coord}, {y_coord})")
-    subprocess.run(f'{adb_path} -s {device_serial} shell input tap {x_coord} {y_coord}', shell=True)
+    subprocess.run(
+        f"{adb_path} -s {device_serial} shell input tap {x_coord} {y_coord}", shell=True
+    )
 
 
 def operation_simple(results):
@@ -178,6 +187,7 @@ def operation_simple(results):
                 click(relative_points[0])
                 print("返回主页")
             break  # 匹配到第一个结果后退出
+
 
 def operation(results):
     for idx, score in results:
@@ -205,6 +215,7 @@ def operation(results):
             elif idx == 6:
                 print("等待战斗结束")
             break  # 匹配到第一个结果后退出
+
 
 def main():
     while True:
