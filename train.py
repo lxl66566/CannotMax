@@ -92,61 +92,70 @@ class ArknightsDataset(Dataset):
         self.augmented_mask = np.zeros(self.original_length, dtype=bool)
 
         if data_enhance:
-            # 数据增强
-            aug_left, aug_right, aug_labels = [], [], []
+            # 计算需要增强的数据量
+            mirror_indices = np.where(
+                (left_features[:, 17] == 0) & (right_features[:, 17] == 0)
+            )[0]
+            enhance_size = len(mirror_indices)
+            print(f"镜像增强的数据量: {enhance_size}")
 
-            for i in range(len(labels)):
+            # 直接扩展原数组
+            left_features = np.vstack((left_features, right_features[mirror_indices]))
+            right_features = np.vstack(
+                (right_features, left_features[: self.original_length][mirror_indices])
+            )
+            labels = np.append(labels, 1 - labels[mirror_indices])
+
+        # 扩展增强
+        if data_enhance:
+            original_length = len(labels)
+            all_new_lefts = []
+            all_new_rights = []
+            all_new_labels = []
+
+            for i in range(original_length):
                 left = left_features[i]
                 right = right_features[i]
                 label = labels[i]
 
-                # 添加原始样本
-                aug_left.append(left)
-                aug_right.append(right)
-                aug_labels.append(label)
-
-                # 增强数据
                 # 找出非零维度
-                non_zero_dims_left = np.nonzero(left)[0]
-                non_zero_dims_right = np.nonzero(right)[0]
+                non_zero_dims = (
+                    np.nonzero(left)[0] if label == 0 else np.nonzero(right)[0]
+                )
+                per_factor = math.ceil(len(non_zero_dims) / augment_factor)
 
-                per_factor = math.ceil(len(non_zero_dims_left) / augment_factor)
-                if label == 0:  # L
-                    for dim in non_zero_dims_left:
-                        original_val = int(left[dim])
-                        # 在 (x+1, x*1.5) 范围内取样
-                        min_val = original_val + 1
-                        max_val = max(int(original_val * 1.5), min_val + 1)
+                for dim in non_zero_dims:
+                    # 获取原始值并计算增强范围
+                    original_val = int(left[dim] if label == 0 else right[dim])
+                    min_val = original_val + 1
+                    max_val = max(int(original_val * 1.5), min_val + 1)
 
-                        new_x = random.sample(
-                            range(min_val, max_val), min(per_factor, max_val - min_val)
-                        )
-                        for x in new_x:
+                    # 随机采样新值
+                    sample_size = min(per_factor, max_val - min_val)
+                    if sample_size <= 0:
+                        continue
+
+                    new_x = random.sample(range(min_val, max_val), sample_size)
+
+                    # 创建增强数据
+                    for x in new_x:
+                        if label == 0:  # L
                             new_left = left.copy()
                             new_left[dim] = x
-                            aug_left.append(new_left)
-                            aug_right.append(right)
-                            aug_labels.append(label)
-                else:  # R
-                    for dim in non_zero_dims_right:
-                        original_val = int(right[dim])
-                        min_val = original_val + 1
-                        max_val = max(int(original_val * 1.5), min_val + 1)
-
-                        new_x = random.sample(
-                            range(min_val, max_val), min(per_factor, max_val - min_val)
-                        )
-                        for x in new_x:
+                            all_new_lefts.append(new_left)
+                            all_new_rights.append(right)
+                        else:  # R
                             new_right = right.copy()
                             new_right[dim] = x
-                            aug_right.append(new_right)
-                            aug_left.append(left)
-                            aug_labels.append(label)
+                            all_new_lefts.append(left)
+                            all_new_rights.append(new_right)
+                        all_new_labels.append(label)
 
-            # 转换增强后的数据为 numpy 数组
-            left_features = np.array(aug_left).astype(np.float32)
-            right_features = np.array(aug_right).astype(np.float32)
-            labels = np.array(aug_labels).astype(np.float32)
+            # 一次性添加所有增强数据
+            if len(all_new_lefts) > 0:
+                left_features = np.vstack((left_features, np.array(all_new_lefts)))
+                right_features = np.vstack((right_features, np.array(all_new_rights)))
+                labels = np.append(labels, all_new_labels)
 
             # 更新增强数据掩码
             self.augmented_mask = np.concatenate(
@@ -475,7 +484,7 @@ def evaluate(model, data_loader, criterion):
     return total_loss / max(1, len(data_loader)), 100 * correct / max(1, total)
 
 
-def stratified_random_split(dataset, test_size=0.1, seed=42):
+def stratified_random_split(dataset: ArknightsDataset, test_size=0.1, seed=42):
     """
     将数据集分割为训练集和测试集，确保增强数据只进入训练集
 
@@ -483,61 +492,69 @@ def stratified_random_split(dataset, test_size=0.1, seed=42):
         dataset: ArknightsDataset 实例
         test_size: 测试集比例
         seed: 随机种子
-    """
-    labels = dataset.labels  # 假设 labels 是一个 GPU tensor
-    if device != "cpu":
-        labels = labels.cpu()  # 移动到 CPU 上进行操作
-    labels = labels.numpy()  # 转换为 numpy array
 
-    # 获取原始数据的索引
+    返回:
+        train_subset: 训练集 Subset
+        test_subset: 测试集 Subset
+    """
+    # 获取标签并转换为numpy数组
+    labels = dataset.labels
+    if labels.device != torch.device("cpu"):
+        labels = labels.cpu()
+    labels = labels.numpy()
+
+    # 获取原始数据和增强数据的索引
     original_indices = np.where(~dataset.augmented_mask)[0]
     augmented_indices = np.where(dataset.augmented_mask)[0]
 
     # 只对原始数据进行分层抽样
     original_labels = labels[original_indices]
-    train_indices_orig, val_indices = train_test_split(
+    train_orig_indices, test_indices = train_test_split(
         original_indices,
         test_size=test_size,
         random_state=seed,
         stratify=original_labels,
     )
 
-    # 将所有增强数据添加到训练集，并转换为列表
-    train_indices = np.concatenate([train_indices_orig, augmented_indices]).tolist()
-    val_indices = val_indices.tolist()
+    # 将所有增强数据添加到训练集
+    train_indices = np.concatenate([train_orig_indices, augmented_indices])
 
-    # 返回训练集和验证集
-    return (
-        torch.utils.data.Subset(dataset, train_indices),
-        torch.utils.data.Subset(dataset, val_indices),
-    )
+    # 转换为列表以保持与你原始代码一致
+    train_indices = train_indices.tolist()
+    test_indices = test_indices.tolist()
+
+    # 创建Subset对象
+    train_subset = torch.utils.data.Subset(dataset, train_indices)
+    test_subset = torch.utils.data.Subset(dataset, test_indices)
+
+    return train_subset, test_subset
 
 
 def main():
     # 配置参数
     config = {
         # 数据文件路径
-        "data_file": "merged_arknights_1.csv",
+        "data_file": "66kfpdd.csv",
         # 训练时的批量大小，影响内存使用和训练速度，128不够用了
-        "batch_size": 2048,
+        "batch_size": 4096,
         # 测试集比例（10%的数据作为测试集）
         "test_size": 0.1,
         # 嵌入层的维度大小（特征表示的维度）128不够用了，512会过拟合
         "embed_dim": 256,
         # Transformer的层数（堆叠的编码器/解码器层数量）
-        "n_layers": 4,
+        "n_layers": 6,
         # 多头注意力机制中的头数
         "num_heads": 8,
         # 学习率，控制参数更新的步长
-        "lr": 1e-4,
+        "lr": 2e-4,
         # 训练的总轮次
-        "epochs": 50,
+        "epochs": 70,
         # 随机种子，用于保证实验可重复性
-        "seed": 42,
+        "seed": 1999,
         # 模型保存目录
         "save_dir": "models",
         # 特征值的最大限制，用于数据预处理，防止极端值影响模型稳定性
-        "max_feature_value": 60,
+        "max_feature_value": 80,
     }
 
     # 创建保存目录
@@ -574,19 +591,12 @@ def main():
         max_value=config["max_feature_value"],  # 使用最大值限制
     )
 
-    # 数据集分割
-    val_size = int(0.1 * len(dataset))  # 10% 验证集
-    train_size = len(dataset) - val_size
-
-    print(f"数据集大小: {len(dataset)}")
-    print(f"训练集大小: {train_size}, 验证集大小: {val_size}")
-
     # 划分
     train_dataset, val_dataset = stratified_random_split(
         dataset, test_size=config["test_size"], seed=config["seed"]
     )
 
-    print(f"训练集大小: {train_size}, 验证集大小: {val_size}")
+    print(f"训练集大小: {len(train_dataset)}, 验证集大小: {len(val_dataset)}")
 
     # 数据加载器
     train_loader = DataLoader(
