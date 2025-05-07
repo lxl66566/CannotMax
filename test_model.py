@@ -62,7 +62,7 @@ def test_model(model_path, data_file, batch_size=1024):
 if __name__ == "__main__":
     # 配置参数
     model_path = "models/best_model_full.pth"  # 使用保存的最佳模型
-    data_file = "Z:/66kfpdd.csv"  # 数据文件路径
+    data_file = "6345ywz3(测试集).csv"  # 数据文件路径
 
     if not os.path.exists(model_path):
         print(f"错误: 模型文件不存在: {model_path}")

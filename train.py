@@ -1,4 +1,3 @@
-import math
 import os
 import random
 from functools import cache
@@ -74,7 +73,7 @@ def preprocess_data(csv_file):
 
 
 class ArknightsDataset(Dataset):
-    def __init__(self, csv_file, max_value=None, data_enhance=True, augment_factor=7):
+    def __init__(self, csv_file, max_value=None, data_enhance=True):
         data = pd.read_csv(csv_file, header=None, skiprows=1)
         features = data.iloc[:, :112].values.astype(np.float32)
         labels = data.iloc[:, 112].map({"L": 0, "R": 1}).values.astype(np.int8)
@@ -93,8 +92,12 @@ class ArknightsDataset(Dataset):
 
         if data_enhance:
             # 计算需要增强的数据量
+            # 排除两个术士，因为选边可能会造成影响
             mirror_indices = np.where(
-                (left_features[:, 17] == 0) & (right_features[:, 17] == 0)
+                (left_features[:, 17] == 0)
+                & (right_features[:, 17] == 0)
+                & (left_features[:, 49] == 0)
+                & (right_features[:, 49] == 0)
             )[0]
             enhance_size = len(mirror_indices)
             print(f"镜像增强的数据量: {enhance_size}")
@@ -122,13 +125,17 @@ class ArknightsDataset(Dataset):
                 non_zero_dims = (
                     np.nonzero(left)[0] if label == 0 else np.nonzero(right)[0]
                 )
-                per_factor = math.ceil(len(non_zero_dims) / augment_factor)
+                # per_factor = math.ceil(len(non_zero_dims) / augment_factor)
+                per_factor = 1
 
-                for dim in non_zero_dims:
+                # 随机选 1 - 2 个维度增加数据，避免假数据过多
+                for dim in random.sample(
+                    non_zero_dims.tolist(), len(non_zero_dims) - 1
+                ):
                     # 获取原始值并计算增强范围
                     original_val = int(left[dim] if label == 0 else right[dim])
                     min_val = original_val + 1
-                    max_val = max(int(original_val * 1.5), min_val + 1)
+                    max_val = max(int(original_val * 1.25), min_val + 1)
 
                     # 随机采样新值
                     sample_size = min(per_factor, max_val - min_val)
@@ -536,21 +543,21 @@ def main():
         # 数据文件路径
         "data_file": "66kfpdd.csv",
         # 训练时的批量大小，影响内存使用和训练速度，128不够用了
-        "batch_size": 4096,
+        "batch_size": 2048,
         # 测试集比例（10%的数据作为测试集）
         "test_size": 0.1,
         # 嵌入层的维度大小（特征表示的维度）128不够用了，512会过拟合
         "embed_dim": 256,
         # Transformer的层数（堆叠的编码器/解码器层数量）
-        "n_layers": 6,
+        "n_layers": 8,
         # 多头注意力机制中的头数
         "num_heads": 8,
         # 学习率，控制参数更新的步长
-        "lr": 2e-4,
+        "lr": 3e-4,
         # 训练的总轮次
-        "epochs": 70,
+        "epochs": 50,
         # 随机种子，用于保证实验可重复性
-        "seed": 1999,
+        "seed": 2025,
         # 模型保存目录
         "save_dir": "models",
         # 特征值的最大限制，用于数据预处理，防止极端值影响模型稳定性
@@ -659,39 +666,46 @@ def main():
         train_accs.append(train_acc)
         val_accs.append(val_acc)
 
-        # 保存最佳模型（基于准确率）
-        if val_acc > best_acc:
-            best_acc = val_acc
-            torch.save(
-                model.state_dict(),
-                os.path.join(config["save_dir"], "best_model_acc.pth"),
-            )
-            torch.save(model, os.path.join(config["save_dir"], "best_model_full.pth"))
-            print("保存了新的最佳准确率模型!")
+        try:
+            # 保存最佳模型（基于准确率）
+            if val_acc > best_acc:
+                best_acc = val_acc
+                torch.save(
+                    model.state_dict(),
+                    os.path.join(config["save_dir"], "best_model_acc.pth"),
+                )
+                torch.save(
+                    model, os.path.join(config["save_dir"], "best_model_full.pth")
+                )
+                print("保存了新的最佳准确率模型!")
 
-        # 保存最佳模型（基于损失）
-        if val_loss < best_loss:
-            best_loss = val_loss
-            torch.save(
-                model.state_dict(),
-                os.path.join(config["save_dir"], "best_model_loss.pth"),
-            )
-            print("保存了新的最佳损失模型!")
+            # 保存最佳模型（基于损失）
+            if val_loss < best_loss:
+                best_loss = val_loss
+                torch.save(
+                    model.state_dict(),
+                    os.path.join(config["save_dir"], "best_model_loss.pth"),
+                )
+                print("保存了新的最佳损失模型!")
 
-        # 保存最新模型
-        torch.save(
-            {
-                "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "train_loss": train_loss,
-                "val_loss": val_loss,
-                "train_acc": train_acc,
-                "val_acc": val_acc,
-                "config": config,
-            },
-            os.path.join(config["save_dir"], "latest_checkpoint.pth"),
-        )
+            # 保存最新模型
+            # torch.save(
+            #     {
+            #         "epoch": epoch,
+            #         "model_state_dict": model.state_dict(),
+            #         "optimizer_state_dict": optimizer.state_dict(),
+            #         "train_loss": train_loss,
+            #         "val_loss": val_loss,
+            #         "train_acc": train_acc,
+            #         "val_acc": val_acc,
+            #         "config": config,
+            #     },
+            #     os.path.join(config["save_dir"], "latest_checkpoint.pth"),
+            # )
+
+        except Exception as e:
+            print(e)
+            pass
 
         # 打印训练信息
         print(f"Train Loss: {train_loss:.4f} | Acc: {train_acc:.2f}%")
