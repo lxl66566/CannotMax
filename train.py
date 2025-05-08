@@ -128,14 +128,15 @@ class ArknightsDataset(Dataset):
                 # per_factor = math.ceil(len(non_zero_dims) / augment_factor)
                 per_factor = 1
 
-                # 随机选 1 - 2 个维度增加数据，避免假数据过多
+                # 随机选 1 个维度增加数据，避免假数据过多
                 for dim in random.sample(
-                    non_zero_dims.tolist(), len(non_zero_dims) - 1
+                    non_zero_dims.tolist(),
+                    1,  # len(non_zero_dims) - 1
                 ):
                     # 获取原始值并计算增强范围
                     original_val = int(left[dim] if label == 0 else right[dim])
                     min_val = original_val + 1
-                    max_val = max(int(original_val * 1.25), min_val + 1)
+                    max_val = max(int(original_val * 1.3), min_val + 1)
 
                     # 随机采样新值
                     sample_size = min(per_factor, max_val - min_val)
@@ -549,13 +550,13 @@ def main():
         # 嵌入层的维度大小（特征表示的维度）128不够用了，512会过拟合
         "embed_dim": 256,
         # Transformer的层数（堆叠的编码器/解码器层数量）
-        "n_layers": 8,
+        "n_layers": 4,
         # 多头注意力机制中的头数
         "num_heads": 8,
         # 学习率，控制参数更新的步长
-        "lr": 3e-4,
+        "lr": 2e-4,
         # 训练的总轮次
-        "epochs": 50,
+        "epochs": 70,
         # 随机种子，用于保证实验可重复性
         "seed": 2025,
         # 模型保存目录
@@ -632,7 +633,7 @@ def main():
 
     # 损失函数和优化器
     criterion = nn.BCELoss()
-    optimizer = optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=1.2e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["epochs"])
 
     # 训练历史记录
